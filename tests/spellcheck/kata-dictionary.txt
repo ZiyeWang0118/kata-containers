@@ -3,6 +3,7 @@
 # Project-Specific Terms
 devkit
 Dragonball
+envd
 genpolicy
 kata
 katacontainers
@@ -166,3 +167,13 @@ Rego
 kcli
 podvm
 eMudhra
+Substrate
+codegen
+libc
+Ziyue
+fdisk
+fsprogs
+ORAS
+chrony
+inotify
+paravirtual

@@ -25,6 +25,7 @@ There are several kinds of Kata configurations and they are listed below.
 |-------| ----- | ----- |
 | `io.katacontainers.config.runtime.experimental` | `boolean` | determines if experimental features enabled |
 | `io.katacontainers.config.runtime.disable_guest_seccomp`| `boolean` | determines if `seccomp` should be applied inside guest |
+| `io.katacontainers.config.runtime.experimental_envd` | JSON object | starts envd in a workload container with `KATA_ENVD_ENABLED=true`. Takes a required `args` array (runtime-rs only, experimental). See [Run envd inside a container](how-to-use-kata-envd.md). |
 | `io.katacontainers.config.runtime.disable_new_netns` | `boolean` | determines if a new netns is created for the hypervisor process |
 | `io.katacontainers.config.runtime.internetworking_model` | string| determines how the VM should be connected to the container network interface. Valid values are `macvtap`, `tcfilter`, `l3forwarding` (runtime-rs only, experimental) and `none` |
 | `io.katacontainers.config.runtime.sandbox_cgroup_only`| `boolean` | determines if Kata processes are managed only in sandbox cgroup |
@@ -44,12 +45,28 @@ There are several kinds of Kata configurations and they are listed below.
 
 ### Hypervisor Options
 
-Hypervisor annotations must be explicitly whitelisted in the Kata runtime config. Example:
+Hypervisor annotations must be explicitly allowed in the Kata runtime
+configuration. Each `enable_annotations` entry is a regular expression matched
+against the part of the annotation key after
+`io.katacontainers.config.hypervisor.`. Matching does not have to cover the
+entire name: `enable_iommu` also matches `enable_iommu_platform`.
+
+Use `^` and `$` to match an exact name:
 
 ```toml title="/path/to/configuration.toml"
-# List of valid annotation names for the hypervisor
-enable_annotations = ["enable_iommu", "kernel_params"]
+# Allow only these exact hypervisor annotation names.
+enable_annotations = ["^enable_iommu$", "^kernel_params$"]
 ```
+
+!!! note "Containerd annotation forwarding"
+    Containerd must also forward an annotation before Kata can apply it.
+    Containerd's annotation filters use glob patterns, not regular expressions.
+    When configuring containerd directly, use the full annotation keys, such as
+    `io.katacontainers.config.hypervisor.enable_iommu`.
+
+    With `kata-deploy`, exact keys can also be added using
+    `containerd.extraPodAnnotations`, as described in the
+    [Helm configuration](../helm-configuration.md#containerd-pod-annotations).
 
 Warning: do not enable `virtio_fs_extra_args` in `enable_annotations` unless you fully trust all annotation sources. Passing arbitrary `virtiofsd` options can be abused for malicious host-side behavior.
 
@@ -63,6 +80,7 @@ Warning: do not enable `virtio_fs_extra_args` in `enable_annotations` unless you
 | `io.katacontainers.config.hypervisor.blk_logical_sector_size` | uint32 | logical sector size in bytes reported by block devices to the guest (0 = hypervisor default, must be a power of 2 between 512 and 65536) |
 | `io.katacontainers.config.hypervisor.blk_physical_sector_size` | uint32 | physical sector size in bytes reported by block devices to the guest (0 = hypervisor default, must be a power of 2 between 512 and 65536) |
 | `io.katacontainers.config.hypervisor.cpu_features` | `string` | Comma-separated list of CPU features to pass to the CPU (QEMU) |
+| `io.katacontainers.config.hypervisor.cpu_model` | `string` | CPU model passed to QEMU's `-cpu` option, for all architectures and protection types (runtime-rs QEMU only, default is `host`). See [Guest CPU model](#guest-cpu-model) |
 | `io.katacontainers.config.hypervisor.default_max_vcpus` | uint32| the maximum number of vCPUs allocated for the VM by the hypervisor |
 | `io.katacontainers.config.hypervisor.default_memory` | uint32| the memory assigned for a VM by the hypervisor in `MiB` |
 | `io.katacontainers.config.hypervisor.default_vcpus` | float32| the default vCPUs assigned for a VM by the hypervisor |
@@ -115,6 +133,14 @@ Warning: do not enable `virtio_fs_extra_args` in `enable_annotations` unless you
 | `io.katacontainers.config.hypervisor.default_gpu_model` | string | the GPU model required for the VM. Only used by remote hypervisor to help with instance selection |
 | `io.katacontainers.config.hypervisor.block_device_num_queues` | `usize` | The number of queues to use for block devices (runtime-rs only) |
 | `io.katacontainers.config.hypervisor.block_device_queue_size` | uint32 | The size of the of the queue to use for block devices (runtime-rs only) |
+
+#### Guest CPU model
+
+By default the guest CPU is `-cpu host`. Set `cpu_model` in the `[hypervisor.qemu]` section of the runtime-rs configuration, or with the `io.katacontainers.config.hypervisor.cpu_model` annotation, to use a named model instead. For example, `cpu_model = "EPYC-Milan-v2"` gives the guests of a mixed-generation fleet the same CPU model, regardless of the host they are scheduled on. The model is not validated: QEMU fails at launch if the host cannot provide it. Only the runtime-rs QEMU hypervisor uses the setting, the Go runtime and the other hypervisors ignore it.
+
+Do not set `cpu_model` for Intel TDX. QEMU's TDX support rejects any CPU model other than `host`, so the TDX configuration files ship with an empty `cpu_model` and the guest fails to start if a named model is set, either in the configuration or with the annotation.
+
+The `cpu_model` annotation is not in the default `enable_annotations` list and has to be allowed explicitly. For SEV-SNP the CPU model is part of the launch measurement, see [Guest CPU model and the launch measurement](how-to-run-kata-containers-with-SNP-VMs.md#guest-cpu-model-and-the-launch-measurement).
 
 ### Container Options
 

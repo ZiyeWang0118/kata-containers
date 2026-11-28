@@ -169,7 +169,7 @@ container-device-interface = "1.1.1"
 containerd-shim = { features = ["async"], version = "0.11.0" }
 containerd-shim-protos = { features = ["async"], version = "0.11.0" }
 crossbeam-channel = "0.5.6"
-derivative = "2.2.0"
+derive-where = "1.7.0"
 device_tree = "1.1.0"
 devicemapper = { git = "https://github.com/stratis-storage/devicemapper-rs", rev = "078e70ceecf0d08eb0c800626827c9bc0a9a8adc" }
 epoll = "=4.3.1"
@@ -251,12 +251,12 @@ tempfile = "3.19.1"
 thiserror = "2.0.18"
 threadpool = "1"
 timerfd = "1.2.0"
-tokio = "1.46.1"
+tokio = "1.54"
 tokio-util = "0.7.17"
 tokio-vsock = "0.3.4"
 toml = "1.1.2"
 tracing = "0.1.44"
-tracing-opentelemetry = "0.18.0"
+tracing-opentelemetry = { default-features = false, version = "0.33.0" }
 tracing-subscriber = "0.3.20"
 ttrpc = "0.9.0"
 url = "2.5.4"
@@ -276,4 +276,4 @@ opt-level = "z"
 # Until a cgroups-rs release has these changes, also for the crates that
 # depend on it, such as containerd-shim.
 [patch.crates-io]
-cgroups-rs = { git = "https://github.com/kata-containers/cgroups-rs", rev = "92579a38825864828b1a56ec8711e55b03f4c46f" }
+cgroups-rs = { git = "https://github.com/kata-containers/cgroups-rs", rev = "a830f86e33acec2f2fba2b8edb17cdc059d33cd2" }

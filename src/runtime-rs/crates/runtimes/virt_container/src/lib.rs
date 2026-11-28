@@ -9,7 +9,13 @@ extern crate slog;
 
 logging::logger_with_subsystem!(sl, "virt-container");
 
+/// Exit status returned when containerd/shim is unable to determine
+/// the actual exit status of a process. This matches containerd's
+/// UnknownExitStatus constant.
+pub(crate) const UNKNOWN_EXIT_STATUS: i32 = 255;
+
 mod container_manager;
+mod envd;
 pub mod factory;
 pub mod health_check;
 pub mod oom;
@@ -67,6 +73,7 @@ use hypervisor::{openvmm::OpenVmm, HYPERVISOR_NAME_OPENVMM};
 use kata_types::config::OpenVmmConfig;
 
 use crate::factory::{check_template_vm_config, template_device_state_path};
+use persist::sandbox_persist::Persist;
 use resource::cpu_mem::initial_size::InitialSizeManager;
 use resource::ResourceManager;
 use sandbox::VIRTCONTAINER;
@@ -135,7 +142,7 @@ impl RuntimeHandler for VirtContainer {
         Arc::new(VirtContainer {})
     }
 
-    #[instrument]
+    #[instrument(skip_all)]
     async fn new_instance(
         &self,
         sid: &str,
@@ -170,11 +177,13 @@ impl RuntimeHandler for VirtContainer {
                 hypervisor.clone(),
                 config,
                 init_size_manager,
+                true,
             )
             .await?,
         );
         let pid = std::process::id();
 
+        let sandbox_annotations = sandbox_config.annotations.clone();
         let sandbox = sandbox::VirtSandbox::new(
             sid,
             msg_sender,
@@ -186,6 +195,12 @@ impl RuntimeHandler for VirtContainer {
         )
         .await
         .context("new virt sandbox")?;
+        // The rootless VMM user, the created netns and the cgroups exist from
+        // here on, and only the state tells recovery about them.
+        sandbox
+            .save()
+            .await
+            .context("save the initial sandbox state")?;
         let container_manager = container_manager::VirtContainerManager::new(
             sid,
             pid,
@@ -193,6 +208,7 @@ impl RuntimeHandler for VirtContainer {
             hypervisor,
             resource_manager,
             sandbox.oom_notifier(),
+            sandbox_annotations,
         );
         Ok(RuntimeInstance {
             sandbox: Arc::new(sandbox),

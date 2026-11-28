@@ -66,9 +66,10 @@ jobs:
           username: ${{ vars.QUAY_DEPLOYER_USERNAME }}
           password: ${{ secrets.QUAY_DEPLOYER_PASSWORD }}
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0 # This is needed in order to keep the commit ids history
           persist-credentials: false
 
@@ -152,9 +153,10 @@ jobs:
       group: ${{ github.workflow }}-${{ github.job }}-${{ github.event.pull_request.number || github.ref }}-s390x-${{ toJSON(matrix) }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0
           persist-credentials: false
 
@@ -208,9 +210,10 @@ jobs:
           username: ${{ vars.QUAY_DEPLOYER_USERNAME }}
           password: ${{ secrets.QUAY_DEPLOYER_PASSWORD }}
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0 # This is needed in order to keep the commit ids history
           persist-credentials: false
 
@@ -300,9 +303,10 @@ jobs:
           username: ${{ vars.QUAY_DEPLOYER_USERNAME }}
           password: ${{ secrets.QUAY_DEPLOYER_PASSWORD }}
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0 # This is needed in order to keep the commit ids history
           persist-credentials: false
 
@@ -346,6 +350,23 @@ jobs:
           retention-days: 15
           if-no-files-found: error
 
+  build-kata-tools-tarball:
+    permissions:
+      contents: read
+      packages: write # needed to push build artifacts to ghcr.io
+    uses: ./.github/workflows/build-kata-tools-tarball.yaml
+    with:
+      arch: s390x
+      runner: ubuntu-26.04-s390x
+      assets: '["agent-ctl","genpolicy","kata-ctl","trace-forwarder"]'
+      stage: ${{ inputs.stage }}
+      tarball-suffix: ${{ inputs.tarball-suffix }}
+      push-to-registry: ${{ inputs.push-to-registry }}
+      commit-hash: ${{ inputs.commit-hash }}
+      target-branch: ${{ inputs.target-branch }}
+    secrets:
+      QUAY_DEPLOYER_PASSWORD: ${{ secrets.QUAY_DEPLOYER_PASSWORD }}
+
   create-kata-tarball:
     name: create-kata-tarball
     runs-on: ubuntu-26.04-s390x
@@ -358,9 +379,10 @@ jobs:
       contents: read
       packages: write # needed to push build artifacts to ghcr.io
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false

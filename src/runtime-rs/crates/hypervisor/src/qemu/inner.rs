@@ -7,7 +7,7 @@ use super::cmdline_generator::{get_network_device, QemuCmdLine};
 use super::qmp::Qmp;
 use crate::device::pci_path::PciPath;
 use crate::device::topology::PCIePort;
-use crate::qemu::cmdline_generator::VfioDeviceConfig;
+use crate::qemu::cmdline_generator::{VfioDeviceConfig, VfioDeviceFdConfig};
 use crate::qemu::qmp::get_qmp_socket_path;
 use crate::{
     device::driver::ProtectionDeviceConfig, hypervisor_persist::HypervisorState, selinux,
@@ -34,13 +34,15 @@ use kata_types::{
 use persist::sandbox_persist::Persist;
 use qapi_qmp::MigrationStatus;
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 use std::convert::{TryFrom, TryInto};
-use std::fs;
-use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::fs::{self, File};
+use std::io::{self, Read};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use tokio::time::sleep;
@@ -65,6 +67,134 @@ fn open_qemu_pidfd(pid: u32) -> Result<Arc<OwnedFd>> {
     Ok(Arc::new(unsafe { OwnedFd::from_raw_fd(fd as i32) }))
 }
 
+const QEMU_STDERR_TAIL_LINES: usize = 16;
+const QEMU_STDERR_MAX_LINE: usize = 4096;
+const EARLY_STDERR_INTERVAL: Duration = Duration::from_millis(50);
+const NO_STDERR_OUTPUT: &str = "no output on stderr";
+
+// The task that logs QEMU's stderr may not run while Qmp::new() keeps the
+// thread busy, and a pipe nobody reads fills up and blocks QEMU before it
+// gets to QMP. A QMP attempt can itself wait for seconds, so the reading
+// cannot be left to the time between attempts either.
+struct EarlyStderr {
+    pipe: File,
+    unfinished_line: Vec<u8>,
+    tail: VecDeque<String>,
+}
+
+impl EarlyStderr {
+    fn new(pipe: File) -> Self {
+        Self {
+            pipe,
+            unfinished_line: Vec::new(),
+            tail: VecDeque::new(),
+        }
+    }
+
+    fn read(&mut self, at_end: bool) {
+        let mut chunk = [0; 4096];
+        while let Ok(len @ 1..) = self.pipe.read(&mut chunk) {
+            self.unfinished_line.extend_from_slice(&chunk[..len]);
+            while let Some(end) = self.unfinished_line.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = self.unfinished_line.drain(..=end).collect();
+                self.keep(&line[..end]);
+            }
+            if self.unfinished_line.len() > QEMU_STDERR_MAX_LINE {
+                let line = std::mem::take(&mut self.unfinished_line);
+                self.keep(&line);
+            }
+        }
+        if at_end && !self.unfinished_line.is_empty() {
+            let line = std::mem::take(&mut self.unfinished_line);
+            self.keep(&line);
+        }
+    }
+
+    fn keep(&mut self, line: &[u8]) {
+        let line = String::from_utf8_lossy(line).into_owned();
+        info!(sl!(), "qemu stderr: {:?}", line);
+        if self.tail.len() == QEMU_STDERR_TAIL_LINES {
+            self.tail.pop_front();
+        }
+        self.tail.push_back(line);
+    }
+}
+
+// Reaping QEMU here would take its PID away, and the sandbox needs that to
+// confirm the VMM is gone before it cleans up.
+fn qemu_exit_reason(
+    pidfd: Option<&OwnedFd>,
+    stderr: Option<&StdMutex<EarlyStderr>>,
+) -> Option<String> {
+    if !pidfd.is_some_and(|pidfd| qemu_is_gone(false, true, Some(pidfd))) {
+        return None;
+    }
+    let mut reason = String::new();
+    if let Some(mut stderr) = stderr.and_then(|stderr| stderr.lock().ok()) {
+        stderr.read(true);
+        reason = stderr.tail.make_contiguous().join("; ");
+    }
+    // A QEMU that was killed says nothing, and the error would end at its
+    // colon.
+    if reason.is_empty() {
+        reason = NO_STDERR_OUTPUT.to_string();
+    }
+    Some(reason)
+}
+
+struct EarlyStderrReader {
+    stop: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl EarlyStderrReader {
+    fn start(stderr: Arc<StdMutex<EarlyStderr>>) -> Self {
+        let (stop, stopped) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(EARLY_STDERR_INTERVAL) {
+                if let Ok(mut stderr) = stderr.lock() {
+                    stderr.read(false);
+                }
+            }
+            if let Ok(mut stderr) = stderr.lock() {
+                stderr.read(true);
+            }
+        });
+        Self { stop, thread }
+    }
+
+    // Two readers of one pipe would mix up QEMU's lines, so the thread has
+    // to be gone before the logging task starts.
+    fn finish(self) {
+        drop(self.stop);
+        let _ = self.thread.join();
+    }
+}
+
+// The reader thread is gone when this returns, so the logging task can take
+// over the pipe.
+fn connect_qmp(
+    qmp_socket_path: &str,
+    pidfd: Option<&OwnedFd>,
+    stderr: &ChildStderr,
+) -> Result<Qmp> {
+    let early_stderr = stderr
+        .as_fd()
+        .try_clone_to_owned()
+        .ok()
+        .map(|pipe| Arc::new(StdMutex::new(EarlyStderr::new(File::from(pipe)))));
+    let reader = early_stderr.clone().map(EarlyStderrReader::start);
+
+    let qmp = Qmp::new(qmp_socket_path, || {
+        qemu_exit_reason(pidfd, early_stderr.as_deref())
+    });
+
+    if let Some(reader) = reader {
+        reader.finish();
+    }
+    qmp
+}
+
 fn qemu_is_gone(exit_reaped: bool, qmp_connected: bool, pidfd: Option<&OwnedFd>) -> bool {
     if exit_reaped || !qmp_connected {
         return true;
@@ -79,6 +209,14 @@ fn qemu_is_gone(exit_reaped: bool, qmp_connected: bool, pidfd: Option<&OwnedFd>)
     };
     let rc = unsafe { libc::poll(&mut pollfd, 1, 0) };
     rc > 0 && pollfd.revents & libc::POLLIN != 0
+}
+
+fn vfio_qdev_id(device_id: &str, index: usize) -> String {
+    if index == 0 {
+        device_id.to_string()
+    } else {
+        format!("{device_id}-{index}")
+    }
 }
 
 #[derive(Debug)]
@@ -304,10 +442,28 @@ impl QemuInner {
                         )
                     };
 
+                    if iommufd.is_some() && devices.iter().any(|dev| dev.vfio_cdev.is_none()) {
+                        return Err(anyhow!("VFIO IOMMUFD group has a device without a cdev"));
+                    }
+
+                    if device_type != VfioDeviceType::MediatedAp && devices.len() > 8 {
+                        return Err(anyhow!("VFIO group has more than 8 PCI functions"));
+                    }
+
                     if device_type == VfioDeviceType::MediatedAp {
                         // s390x VFIO-AP: -device vfio-ap,sysfsdev=<path>
                         // No PCIe root port, no guest_pci_path.
-                        cmdline.add_vfio_ap_device(&ap_sysfs_path)?;
+                        // IOMMUFD cdev: pass /dev/iommu and the cdev as inherited fds,
+                        // like vfio-pci.
+                        let ap_fd_config = iommufd
+                            .as_ref()
+                            .zip(devices.first().and_then(|d| d.vfio_cdev.as_ref()))
+                            .map(|(iommufd, cdev)| VfioDeviceFdConfig {
+                                iommufd_dev: iommufd.iommufd_dev.clone(),
+                                vfio_cdev: cdev.devnode.clone(),
+                                qemu_device_id: format!("vfio-{vfio_device_id}-0"),
+                            });
+                        cmdline.add_vfio_ap_device(&ap_sysfs_path, ap_fd_config.as_ref())?;
                         info!(
                             sl!(),
                             "Completed VFIOModern AP coldplug for sysfsdev: {}", ap_sysfs_path
@@ -322,7 +478,15 @@ impl QemuInner {
                                 bus_port_id.1 as u16,
                                 bus_port_id.1 + 1,
                             )
-                            .with_vfio_bus(bus_port_id.0.clone());
+                            .with_vfio_bus(bus_port_id.0.clone())
+                            .with_qdev_id(vfio_qdev_id(&vfio_device_id, index))
+                            .with_root_port(index == 0)
+                            .with_vfio_addr(if devices.len() > 1 {
+                                format!("0x0.0x{:x}", index)
+                            } else {
+                                "0x0".to_string()
+                            })
+                            .with_vfio_multifunction(index == 0 && devices.len() > 1);
                             if let (Some(iommufd), Some(cdev)) =
                                 (iommufd.as_ref(), dev.vfio_cdev.as_ref())
                             {
@@ -342,69 +506,18 @@ impl QemuInner {
                         {
                             let mut vfio_device = vfio_dev.lock().await;
                             vfio_device.config.guest_pci_path = Some(pci_path.clone());
+                            vfio_device.device_options = devices
+                                .iter()
+                                .enumerate()
+                                .map(|(index, device)| {
+                                    format!("{}={:02x}/00.{:x}", device.addr, bus_port_id.1, index)
+                                })
+                                .collect();
                         }
                         info!(
                             sl!(),
                             "Completed VFIOModern coldplug with returned guest pci path: {:?}",
                             pci_path
-                        );
-                    }
-                }
-                DeviceType::Vfio(vfio_dev) => {
-                    // Cold-plug physical-endpoint VFs (non-IOMMUFD VFIO) onto
-                    // pre-allocated PCIe root ports.  The bus assignment and
-                    // guest PCI path were computed by do_add_pcie_endpoint()
-                    // at device-registration time.
-                    //
-                    // We must emit BOTH:
-                    //   1. the pcie-root-port for vfio_dev.bus (e.g. "rp1")
-                    //   2. the vfio-pci device on that bus
-                    //
-                    // add_pcie_root_ports() skips allocated ports assuming
-                    // VfioModern already emitted them.  For regular Vfio
-                    // (physical endpoints) we have to emit the root port here.
-                    let port_index = vfio_dev
-                        .bus
-                        .strip_prefix("rp")
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(0);
-                    cmdline.add_physical_endpoint_root_port(&vfio_dev.bus, port_index);
-
-                    for hostdev in &vfio_dev.devices {
-                        let host_bdf = format!("{}:{}", hostdev.domain, hostdev.bus_slot_func);
-                        let (vendor_id, device_id) =
-                            hostdev
-                                .device_vendor_class
-                                .as_ref()
-                                .map_or((None, None), |dvc| {
-                                    let (dev, vendor) = dvc.get_device_vendor().unwrap_or((0, 0));
-                                    let v = if vendor != 0 {
-                                        Some(format!("0x{:04x}", vendor))
-                                    } else {
-                                        None
-                                    };
-                                    let d = if dev != 0 {
-                                        Some(format!("0x{:04x}", dev))
-                                    } else {
-                                        None
-                                    };
-                                    (v, d)
-                                });
-                        cmdline.add_physical_vfio_device(
-                            &host_bdf,
-                            &hostdev.hostdev_id,
-                            &vfio_dev.bus,
-                            vendor_id.as_deref(),
-                            device_id.as_deref(),
-                        );
-                        info!(
-                            sl!(),
-                            "cold-plug physical VFIO device: host={} id={} bus={} \
-                             guest_pci_path={:?}",
-                            host_bdf,
-                            hostdev.hostdev_id,
-                            vfio_dev.bus,
-                            hostdev.guest_pci_path,
                         );
                     }
                 }
@@ -492,8 +605,6 @@ impl QemuInner {
             .take()
             .ok_or_else(|| anyhow!("no exit notify"))?;
 
-        tokio::spawn(log_qemu_stderr(stderr, exit_notify));
-
         // When hypervisor debug is enabled, output the kernel boot messages for debugging.
         if self.config.debug_info.enable_debug {
             tokio::spawn(async move {
@@ -508,7 +619,10 @@ impl QemuInner {
 
         let qmp_socket_path = get_qmp_socket_path(self.id.as_str());
 
-        match Qmp::new(&qmp_socket_path) {
+        let qmp = connect_qmp(&qmp_socket_path, self.qemu_pidfd.as_deref(), &stderr);
+        tokio::spawn(log_qemu_stderr(stderr, exit_notify));
+
+        match qmp {
             Ok(mut qmp) => {
                 if let Some(subchannel) = ccw_subchannel {
                     qmp.set_ccw_subchannel(subchannel);
@@ -1176,15 +1290,25 @@ async fn log_qemu_console(console: UnixStream) -> Result<()> {
 async fn log_qemu_stderr(stderr: ChildStderr, exit_notify: mpsc::Sender<()>) -> Result<()> {
     info!(sl!(), "starting reading qemu stderr");
 
-    let stderr_reader = BufReader::new(stderr);
-    let mut stderr_lines = stderr_reader.lines();
+    let mut stderr_reader = BufReader::new(stderr);
+    let mut line = Vec::new();
 
-    while let Some(buffer) = stderr_lines
-        .next_line()
+    // Giving up on bytes that are not UTF-8 would close the pipe under a
+    // QEMU that is still running, and the reading before this task may have
+    // stopped in the middle of a character.
+    while stderr_reader
+        .read_until(b'\n', &mut line)
         .await
-        .context("next_line() failed on qemu stderr")?
+        .context("read_until() failed on qemu stderr")?
+        > 0
     {
-        info!(sl!(), "qemu stderr: {:?}", buffer);
+        let text = String::from_utf8_lossy(&line);
+        info!(
+            sl!(),
+            "qemu stderr: {:?}",
+            text.trim_end_matches(['\n', '\r'])
+        );
+        line.clear();
     }
 
     // Notfiy the waiter the process exit.
@@ -1228,7 +1352,6 @@ impl QemuInner {
             (DeviceType::BlockModern(a), DeviceType::BlockModern(b)) => {
                 !std::sync::Arc::ptr_eq(a, b)
             }
-            (DeviceType::Vfio(a), DeviceType::Vfio(b)) => a.device_id != b.device_id,
             (DeviceType::VfioModern(a), DeviceType::VfioModern(b)) => !std::sync::Arc::ptr_eq(a, b),
             _ => true,
         });
@@ -1254,19 +1377,16 @@ impl QemuInner {
                 qmp.hotunplug_block_device(&driver, index)
                     .context("hotunplug block device")?;
             }
-            DeviceType::Vfio(ref vfio_device) => {
-                let hostdev_id = vfio_device
-                    .devices
-                    .first()
-                    .map(|device| device.hostdev_id.as_str())
-                    .ok_or_else(|| anyhow!("VFIO device has no host device to hotunplug"))?;
-                qmp.hotunplug_vfio_device(hostdev_id)
-                    .context("hotunplug VFIO device")?;
-            }
             DeviceType::VfioModern(ref vfio_device) => {
-                let hostdev_id = vfio_device.lock().await.device_id.clone();
-                qmp.hotunplug_vfio_device(&hostdev_id)
-                    .context("hotunplug VFIO device")?;
+                let (hostdev_id, device_count) = {
+                    let vfio = vfio_device.lock().await;
+                    (vfio.device_id.clone(), vfio.device.devices.len().max(1))
+                };
+                for index in (0..device_count).rev() {
+                    let qdev_id = vfio_qdev_id(&hostdev_id, index);
+                    qmp.hotunplug_vfio_device(&qdev_id)
+                        .with_context(|| format!("hotunplug VFIO device {qdev_id}"))?;
+                }
             }
             DeviceType::Network(_)
             | DeviceType::VhostUserBlk(_)
@@ -1313,26 +1433,6 @@ impl QemuInner {
                 }
 
                 return Ok(DeviceType::Network(network_device));
-            }
-            DeviceType::Vfio(mut vfiodev) => {
-                // FIXME: the first one might not the true device we want to passthrough.
-                // The `multifunction=on` is temporarily unsupported.
-                // Tracking issue #11292 has been created to monitor progress towards full multifunction support.
-                let primary_device = vfiodev.devices.first_mut().unwrap();
-                info!(
-                    sl!(),
-                    "qmp hotplug vfio primary_device {:?}", &primary_device
-                );
-
-                primary_device.guest_pci_path = qmp.hotplug_vfio_device(
-                    &primary_device.hostdev_id,
-                    &primary_device.sysfs_path,
-                    &primary_device.bus_slot_func,
-                    &vfiodev.driver_type,
-                    &vfiodev.bus,
-                )?;
-
-                return Ok(DeviceType::Vfio(vfiodev));
             }
             DeviceType::BlockModern(ref block_device) => {
                 info!(sl!(), "Starting QMP hotplug for BlockModern device");
@@ -1484,8 +1584,10 @@ impl QemuInner {
                 {
                     let mut vfio_device = vfiodev.lock().await;
                     if device_type != VfioDeviceType::MediatedAp {
-                        if let Some(p) = guest_pci_path {
-                            vfio_device.config.guest_pci_path = Some(p);
+                        if let Some(pci_path) = guest_pci_path {
+                            vfio_device.config.guest_pci_path = Some(pci_path.clone());
+                            vfio_device.device_options =
+                                vec![format!("{}={}", vfio_device.device.primary.addr, pci_path)];
                         }
                     }
                     info!(
@@ -1577,6 +1679,84 @@ mod tests {
     use crate::qemu::Qemu;
     use crate::Hypervisor;
     use rstest::rstest;
+
+    #[tokio::test]
+    async fn a_qemu_that_exits_before_qmp_is_ready_is_reported_at_once() {
+        let mut qemu = Command::new("sh")
+            .args([
+                "-c",
+                "sleep 5 & head -c 200000 /dev/zero >&2; echo; echo no such device >&2; exit 3",
+            ])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pidfd = open_qemu_pidfd(qemu.id().unwrap()).unwrap();
+        let stderr = qemu.stderr.take().unwrap();
+
+        let started = std::time::Instant::now();
+        let err = connect_qmp("/nonexistent/qmp.sock", Some(&pidfd), &stderr).unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(format!("{err:#}").contains("no such device"), "{}", err);
+        assert!(qemu.id().is_some(), "QEMU was reaped");
+    }
+
+    #[tokio::test]
+    async fn a_qemu_that_exits_without_a_word_still_gets_a_reason() {
+        let mut qemu = Command::new("true").stderr(Stdio::piped()).spawn().unwrap();
+        let pidfd = open_qemu_pidfd(qemu.id().unwrap()).unwrap();
+        let stderr = qemu.stderr.take().unwrap();
+
+        let err = connect_qmp("/nonexistent/qmp.sock", Some(&pidfd), &stderr).unwrap_err();
+
+        assert!(format!("{err:#}").ends_with(NO_STDERR_OUTPUT), "{}", err);
+    }
+
+    #[tokio::test]
+    async fn stderr_that_is_not_utf8_does_not_stop_the_logger() {
+        let mut qemu = Command::new("sh")
+            .args(["-c", r"printf '\251\n' >&2; echo still running >&2"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (exit_notify, mut exited) = mpsc::channel(1);
+
+        log_qemu_stderr(qemu.stderr.take().unwrap(), exit_notify)
+            .await
+            .unwrap();
+
+        assert!(exited.try_recv().is_ok());
+    }
+
+    #[rstest]
+    #[case::success("exit 0", 0)]
+    #[case::failure("exit 23", 23)]
+    #[case::sigkill("kill -KILL $$", 137)]
+    #[case::sigterm("kill -TERM $$", 143)]
+    #[tokio::test]
+    async fn wait_vm_reports_exit_status(#[case] script: &str, #[case] expected: i32) {
+        let qemu = Qemu::new();
+        let mut inner = qemu.inner.write().await;
+        let child = Command::new("sh")
+            .args(["-c", script])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        *inner.qemu_process.lock().await = Some(child);
+        let notify = inner.exit_notify.take().unwrap();
+        drop(inner);
+        notify.send(()).await.unwrap();
+        drop(notify);
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), qemu.wait_vm())
+                .await
+                .expect("wait_vm must report the child exit")
+                .unwrap(),
+            expected
+        );
+        assert_eq!(qemu.wait_vm().await.unwrap(), expected);
+    }
 
     #[tokio::test]
     async fn network_removal_without_qemu_does_not_hotunplug() {
@@ -1680,7 +1860,7 @@ mod tests {
             .await
             .expect("stop blocked behind exit watcher")
             .unwrap();
-        assert_eq!(waiter.await.unwrap().unwrap(), 0);
+        assert_eq!(waiter.await.unwrap().unwrap(), 137);
     }
 
     #[tokio::test]

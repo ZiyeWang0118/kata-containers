@@ -46,6 +46,7 @@ jobs:
       matrix:
         asset:
           - agent
+          - agent-substrate
           - busybox
           - cloud-hypervisor
           - coco-guest-components
@@ -75,9 +76,10 @@ jobs:
           username: ${{ vars.QUAY_DEPLOYER_USERNAME }}
           password: ${{ secrets.QUAY_DEPLOYER_PASSWORD }}
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0 # This is needed in order to keep the commit ids history
           persist-credentials: false
 
@@ -117,10 +119,13 @@ jobs:
           echo "oci-name=${oci_image%@*}" >> "$GITHUB_OUTPUT"
           echo "oci-digest=${oci_image#*@}" >> "$GITHUB_OUTPUT"
 
-      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1.2.4
+      - name: Install ORAS from versions.yaml
         if: ${{ env.PERFORM_ATTESTATION == 'yes' }}
-        with:
-          version: "1.2.0"
+        run: |
+          ./ci/install_yq.sh
+          ./tools/packaging/kata-deploy/local-build/dockerbuild/install_oras.sh
+        env:
+          INSTALL_IN_GOPATH: "false"
 
       # for pushing attestations to the registry
       - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
@@ -140,7 +145,7 @@ jobs:
       - name: store-artifact ${{ matrix.asset }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: kata-artifacts-arm64-${{ matrix.asset }}${{ inputs.tarball-suffix }}
+          name: ${{ contains(matrix.asset, 'substrate') && 'kata-substrate-artifacts' || 'kata-artifacts' }}-arm64-${{ matrix.asset }}${{ inputs.tarball-suffix }}
           path: kata-build/kata-static-${{ matrix.asset }}.tar.zst
           retention-days: 15
           if-no-files-found: error
@@ -167,9 +172,10 @@ jobs:
       group: ${{ github.workflow }}-${{ github.job }}-${{ github.event.pull_request.number || github.ref }}-arm64-${{ toJSON(matrix) }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0
           persist-credentials: false
 
@@ -207,6 +213,7 @@ jobs:
       matrix:
         asset:
           - rootfs-image
+          - rootfs-image-substrate
           - rootfs-image-confidential
           - rootfs-image-coco-extension
           - rootfs-image-devkit-extension
@@ -226,9 +233,10 @@ jobs:
           username: ${{ vars.QUAY_DEPLOYER_USERNAME }}
           password: ${{ secrets.QUAY_DEPLOYER_PASSWORD }}
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0 # This is needed in order to keep the commit ids history
           persist-credentials: false
 
@@ -239,11 +247,19 @@ jobs:
           TARGET_BRANCH: ${{ inputs.target-branch }}
 
       - name: get-artifacts
+        if: matrix.asset != 'rootfs-image-substrate'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: kata-artifacts-arm64-*${{ inputs.tarball-suffix }}
           path: kata-artifacts
           merge-multiple: true
+
+      - name: Get Substrate agent
+        if: matrix.asset == 'rootfs-image-substrate'
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: kata-substrate-artifacts-arm64-agent-substrate${{ inputs.tarball-suffix }}
+          path: kata-artifacts
 
       - name: Build ${{ matrix.asset }}
         run: |
@@ -268,7 +284,7 @@ jobs:
       - name: store-artifact ${{ matrix.asset }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: kata-artifacts-arm64-${{ matrix.asset }}${{ inputs.tarball-suffix }}
+          name: ${{ contains(matrix.asset, 'substrate') && 'kata-substrate-artifacts' || 'kata-artifacts' }}-arm64-${{ matrix.asset }}${{ inputs.tarball-suffix }}
           path: kata-build/kata-static-${{ matrix.asset }}.tar.zst
           retention-days: 15
           if-no-files-found: error
@@ -335,9 +351,10 @@ jobs:
           username: ${{ vars.QUAY_DEPLOYER_USERNAME }}
           password: ${{ secrets.QUAY_DEPLOYER_PASSWORD }}
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0 # This is needed in order to keep the commit ids history
           persist-credentials: false
 
@@ -380,114 +397,22 @@ jobs:
           retention-days: 15
           if-no-files-found: error
 
-  build-tools-asset:
-    name: build-tools-asset
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+  build-kata-tools-tarball:
     permissions:
       contents: read
       packages: write # needed to push build artifacts to ghcr.io
-    strategy:
-      matrix:
-        asset:
-          - genpolicy
-          - kata-ctl
-        stage:
-          - ${{ inputs.stage }}
-    steps:
-      - name: Login to Kata Containers quay.io
-        if: ${{ inputs.push-to-registry == 'yes' }}
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
-        with:
-          registry: quay.io
-          username: ${{ vars.QUAY_DEPLOYER_USERNAME }}
-          password: ${{ secrets.QUAY_DEPLOYER_PASSWORD }}
-
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: ${{ inputs.commit-hash }}
-          fetch-depth: 0 # This is needed in order to keep the commit ids history
-          persist-credentials: false
-
-      - name: Rebase atop of the latest target branch
-        run: |
-          ./tests/git-helper.sh "rebase-atop-of-the-latest-target-branch"
-        env:
-          TARGET_BRANCH: ${{ inputs.target-branch }}
-
-      - name: Build ${{ matrix.asset }}
-        id: build
-        run: |
-          make "${KATA_ASSET}-tarball"
-          build_dir=$(readlink -f build)
-          # store-artifact does not work with symlink
-          mkdir -p kata-tools-build && cp "${build_dir}"/kata-static-"${KATA_ASSET}"*.tar.* kata-tools-build/.
-        env:
-          KATA_ASSET: ${{ matrix.asset }}
-          TAR_OUTPUT: ${{ matrix.asset }}.tar.gz
-          PUSH_TO_REGISTRY: ${{ inputs.push-to-registry }}
-          ARTEFACT_REGISTRY: ghcr.io
-          ARTEFACT_REGISTRY_USERNAME: ${{ github.actor }}
-          ARTEFACT_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-          TARGET_BRANCH: ${{ inputs.target-branch }}
-          RELEASE: ${{ inputs.stage == 'release' && 'yes' || 'no' }}
-
-      - name: store-artifact ${{ matrix.asset }}
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: kata-tools-artifacts-arm64-${{ matrix.asset }}${{ inputs.tarball-suffix }}
-          path: kata-tools-build/kata-static-${{ matrix.asset }}.tar.zst
-          retention-days: 15
-          if-no-files-found: error
-
-  create-kata-tools-tarball:
-    name: create-kata-tools-tarball
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
-    needs: [build-tools-asset]
-    permissions:
-      contents: read
-      packages: write # needed to push build artifacts to ghcr.io
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: ${{ inputs.commit-hash }}
-          fetch-depth: 0
-          fetch-tags: true
-          persist-credentials: false
-      - name: Rebase atop of the latest target branch
-        run: |
-          ./tests/git-helper.sh "rebase-atop-of-the-latest-target-branch"
-        env:
-          TARGET_BRANCH: ${{ inputs.target-branch }}
-      - name: get-artifacts
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          pattern: kata-tools-artifacts-arm64-*${{ inputs.tarball-suffix }}
-          path: kata-tools-artifacts
-          merge-multiple: true
-      - name: merge-artifacts
-        run: |
-          ./tools/packaging/kata-deploy/local-build/kata-deploy-merge-builds.sh kata-tools-artifacts versions.yaml kata-tools-static.tar.zst
-        env:
-          RELEASE: ${{ inputs.stage == 'release' && 'yes' || 'no' }}
-      - name: Check kata-tools tarball size (GitHub release asset limit)
-        run: |
-          # https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases#storage-and-bandwidth-quotas
-          GITHUB_ASSET_MAX_BYTES=2147483648
-          tarball_size=$(stat -c "%s" kata-tools-static.tar.zst)
-          if [[ "${tarball_size}" -ge "${GITHUB_ASSET_MAX_BYTES}" ]]; then
-            echo "::error::tarball size (${tarball_size} bytes) >= GitHub release asset limit (${GITHUB_ASSET_MAX_BYTES} bytes)"
-            exit 1
-          fi
-          echo "tarball size: ${tarball_size} bytes"
-      - name: store-artifacts
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: kata-tools-static-tarball-arm64${{ inputs.tarball-suffix }}
-          path: kata-tools-static.tar.zst
-          retention-days: 15
-          if-no-files-found: error
+    uses: ./.github/workflows/build-kata-tools-tarball.yaml
+    with:
+      arch: arm64
+      runner: ubuntu-24.04-arm
+      assets: '["genpolicy","kata-ctl"]'
+      stage: ${{ inputs.stage }}
+      tarball-suffix: ${{ inputs.tarball-suffix }}
+      push-to-registry: ${{ inputs.push-to-registry }}
+      commit-hash: ${{ inputs.commit-hash }}
+      target-branch: ${{ inputs.target-branch }}
+    secrets:
+      QUAY_DEPLOYER_PASSWORD: ${{ secrets.QUAY_DEPLOYER_PASSWORD }}
 
   create-kata-tarball:
     name: create-kata-tarball
@@ -498,9 +423,10 @@ jobs:
       contents: read
       packages: write # needed to push build artifacts to ghcr.io
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -515,6 +441,11 @@ jobs:
           pattern: kata-artifacts-arm64-*${{ inputs.tarball-suffix }}
           path: kata-artifacts
           merge-multiple: true
+      - name: Get Substrate rootfs
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: kata-substrate-artifacts-arm64-rootfs-image-substrate${{ inputs.tarball-suffix }}
+          path: kata-artifacts
       - name: merge-artifacts
         run: |
           ./tools/packaging/kata-deploy/local-build/kata-deploy-merge-release-tarballs.sh kata-artifacts versions.yaml arm64
@@ -524,7 +455,7 @@ jobs:
         run: |
           # https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases#storage-and-bandwidth-quotas
           GITHUB_ASSET_MAX_BYTES=2147483648
-          for tarball in kata-static.tar.zst kata-go-static.tar.zst; do
+          for tarball in kata-static.tar.zst kata-go-static.tar.zst kata-static-substrate.tar.zst; do
             tarball_size=$(stat -c "%s" "${tarball}")
             if [[ "${tarball_size}" -ge "${GITHUB_ASSET_MAX_BYTES}" ]]; then
               echo "::error::${tarball} size (${tarball_size} bytes) >= GitHub release asset limit (${GITHUB_ASSET_MAX_BYTES} bytes)"
@@ -544,5 +475,12 @@ jobs:
         with:
           name: kata-go-static-tarball-arm64${{ inputs.tarball-suffix }}
           path: kata-go-static.tar.zst
+          retention-days: 15
+          if-no-files-found: error
+      - name: Store Substrate guest artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: kata-static-substrate-tarball-arm64${{ inputs.tarball-suffix }}
+          path: kata-static-substrate.tar.zst
           retention-days: 15
           if-no-files-found: error

@@ -41,9 +41,10 @@ jobs:
       KATA_HYPERVISOR: ${{ matrix.vmm }}
       SANDBOXER: "shim"
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0
           persist-credentials: false
 
@@ -101,9 +102,10 @@ jobs:
       KATA_HYPERVISOR: ${{ matrix.vmm }}
       SANDBOXER: "podsandbox"
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0
           persist-credentials: false
       - name: Rebase atop of the latest target branch
@@ -159,9 +161,10 @@ jobs:
       GOPATH: ${{ github.workspace }}
       KATA_HYPERVISOR: ${{ matrix.vmm }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0
           persist-credentials: false
 
@@ -218,9 +221,10 @@ jobs:
     env:
       KATA_HYPERVISOR: ${{ matrix.vmm }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0
           persist-credentials: false
 
@@ -274,9 +278,10 @@ jobs:
     env:
       KATA_HYPERVISOR: ${{ matrix.vmm }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0
           persist-credentials: false
 
@@ -317,6 +322,47 @@ jobs:
           path: /tmp/artifacts
           retention-days: 1
 
+  run-tracing:
+    name: run-tracing
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.job }}-${{ github.event.pull_request.number || github.ref }}-tracing-amd64
+      cancel-in-progress: true
+    timeout-minutes: 15
+    env:
+      KATA_HYPERVISOR: qemu-runtime-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.commit-hash }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rebase atop of the latest target branch
+        run: |
+          ./tests/git-helper.sh "rebase-atop-of-the-latest-target-branch"
+        env:
+          TARGET_BRANCH: ${{ inputs.target-branch }}
+
+      - name: Install dependencies
+        env:
+          GITHUB_API_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash tests/functional/tracing/gha-run.sh install-dependencies
+
+      - name: get-kata-tarball
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: kata-static-tarball-amd64${{ inputs.tarball-suffix }}
+          path: kata-artifacts
+
+      - name: Install kata
+        run: bash tests/functional/tracing/gha-run.sh install-kata kata-artifacts
+
+      - name: Run tracing test
+        timeout-minutes: 5
+        run: bash tests/functional/tracing/gha-run.sh run
+
   run-kata-agent-apis:
     name: run-kata-agent-apis
     runs-on: ubuntu-24.04
@@ -325,9 +371,10 @@ jobs:
       cancel-in-progress: true
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0
           persist-credentials: false
 

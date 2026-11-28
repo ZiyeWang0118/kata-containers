@@ -373,17 +373,23 @@ function report_tests() {
 	report_bats_tests "${kubernetes_dir}"
 }
 
+# Collect artifacts for later archiving.
+#
+# Clear the artifacts directory first if it exists.
+# When the test start time is not defined, this prevents
+# later archiving from possibly archiving stale information.
 function collect_artifacts() {
-	if [[ -z "${start_time:-}" ]]; then
-		warn "tests start time is not defined. Cannot gather journal information"
-		return
-	fi
-
 	local artifacts_dir
 	artifacts_dir="/tmp/artifacts"
 	if [[ -d "${artifacts_dir}" ]]; then
 		rm -rf "${artifacts_dir}"
 	fi
+
+	if [[ -z "${start_time:-}" ]]; then
+		warn "tests start time is not defined. Cannot gather journal information"
+		return
+	fi
+
 	mkdir -p "${artifacts_dir}"
 	info "Collecting artifacts using ${KATA_HYPERVISOR} hypervisor"
 	local journalctl_log_filename
@@ -481,7 +487,7 @@ function cleanup() {
 		return
 	fi
 
-	# In case of canceling workflow manually, 'run_kubernetes_tests.sh' continues running and triggers new tests,
+	# In case of canceling workflow manually, 'run_kubernetes_[nv_]tests.sh' continues running and triggers new tests,
 	# resulting in the CI being in an unexpected state. So we need kill all running test scripts before cleaning up the node.
 	# See issue https://github.com/kata-containers/kata-containers/issues/9980
 	delete_test_runners || true

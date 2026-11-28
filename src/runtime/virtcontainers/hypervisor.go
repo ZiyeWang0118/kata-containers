@@ -57,9 +57,6 @@ const (
 	// DragonballHypervisor is the Dragonball hypervisor.
 	DragonballHypervisor HypervisorType = "dragonball"
 
-	// VirtFrameworkHypervisor is the Darwin Virtualization.framework hypervisor
-	VirtframeworkHypervisor HypervisorType = "virtframework"
-
 	// RemoteHypervisor is the Remote hypervisor.
 	RemoteHypervisor HypervisorType = "remote"
 
@@ -100,8 +97,6 @@ var (
 )
 
 // In some architectures the maximum number of vCPUs depends on the number of physical cores.
-// TODO (dcantah): Find a suitable value for darwin/vfw. Seems perf degrades if > number of host
-// cores.
 var defaultMaxVCPUs = govmm.MaxVCPUs()
 
 // MaxVCPUs returns the vCPU limit supported by Kata for this hypervisor.
@@ -401,9 +396,6 @@ func (hType *HypervisorType) Set(value string) error {
 	case "dragonball":
 		*hType = DragonballHypervisor
 		return nil
-	case "virtframework":
-		*hType = VirtframeworkHypervisor
-		return nil
 	case "remote":
 		*hType = RemoteHypervisor
 		return nil
@@ -541,6 +533,10 @@ type HypervisorConfig struct {
 	// BlockDeviceDriver specifies the driver to be used for block device
 	// either VirtioSCSI or VirtioBlock with the default driver being defaultBlockDriver
 	BlockDeviceDriver string
+
+	// BlockDeviceReadOnlySlots reserves the last N Firecracker disk slots as
+	// read-only before boot. Zero disables read-only attachments.
+	BlockDeviceReadOnlySlots uint32
 
 	// HypervisorMachineType specifies the type of machine being
 	// emulated.

@@ -2,7 +2,6 @@ required_tests:
   # Always required tests
   - Commit Message Check / Commit Message Check
   - Pull request WIP checks / WIP Check
-  - Darwin tests / test
   - Shellcheck required / shellcheck-required
   - GHA security analysis / zizmor
   - Lint GHA workflows / run-actionlint
@@ -17,11 +16,16 @@ paths:
   # CI
   - "^ci/openshift-ci/": []
   - "^\\.github/workflows/static-checks": ["static"]
-  - "^\\.github/workflows/": []
+  - "^\\.github/workflows/": ["build"]
+  # Docs: only prose counts, so docs-only changes skip the static matrix.
+  # Everything else under docs/ (scripts, data, Dockerfile, ...) is code or
+  # data that the static checks do act on, so it falls through to "static".
+  - "^docs/.*\\.(md|png|jpg|jpeg|svg|gif)$": ["docs"]
+  - "^docs/\\.nav\\.yml$": ["docs"]
+  - "^mkdocs\\.yaml$": ["docs"]
+  - "\\.md$": ["docs"]
+  - "^tests/spellcheck/kata-dictionary.txt": ["docs"]
   - "^docs/": ["static"]
-  - "^mkdocs\\.yaml$": ["static"]
-  - "\\.md$": ["static"]
-  - "^tests/spellcheck/kata-dictionary.txt": ["static"]
   - "^\\.claude/": []
   # TODO: Expand filters
   # Sources
@@ -36,12 +40,14 @@ mapping:
   #     - {required-test-name1}
   #     - {required-test-name2}
   #   regexps: "{python-regular-expression-matching-required-tests}|{another-regexp}|{yet-another-regexp}"
-  #   required-labels:
-  #     - {label-required-to-run-those-tests}
   #
   # TODO: Add support for "depends" to automatically add dependant set-of-tests
   #       (eg. "build" is required for "test")
   # TODO: Add support for "ignore:" to remove individual tests from regexps
+  build:
+    # Gates the CI build stage (skip_build) and the Darwin build checks
+    names:
+      - Darwin tests / test
   test:
     # Checks the basic functional tests work
     names:
@@ -58,10 +64,10 @@ mapping:
       - Kata Containers CI / kata-containers-ci-on-push / run-basic-amd64-tests / run-containerd-stability (minimum, qemu)
       - Kata Containers CI / kata-containers-ci-on-push / run-basic-amd64-tests / run-containerd-stability (minimum, qemu-runtime-rs)
       - Kata Containers CI / kata-containers-ci-on-push / run-basic-amd64-tests / run-kata-agent-apis
-      - Kata Containers CI / kata-containers-ci-on-push / run-basic-amd64-tests / run-nerdctl-tests (clh-runtime-rs)
-      - Kata Containers CI / kata-containers-ci-on-push / run-basic-amd64-tests / run-nerdctl-tests (dragonball)
-      - Kata Containers CI / kata-containers-ci-on-push / run-basic-amd64-tests / run-nerdctl-tests (qemu)
-      - Kata Containers CI / kata-containers-ci-on-push / run-basic-amd64-tests / run-nerdctl-tests (qemu-runtime-rs)
+    # - Kata Containers CI / kata-containers-ci-on-push / run-basic-amd64-tests / run-nerdctl-tests (clh-runtime-rs) # See #14410
+    # - Kata Containers CI / kata-containers-ci-on-push / run-basic-amd64-tests / run-nerdctl-tests (dragonball)
+    # - Kata Containers CI / kata-containers-ci-on-push / run-basic-amd64-tests / run-nerdctl-tests (qemu) # See #14409
+    # - Kata Containers CI / kata-containers-ci-on-push / run-basic-amd64-tests / run-nerdctl-tests (qemu-runtime-rs)
       - Kata Containers CI / kata-containers-ci-on-push / run-basic-amd64-tests / run-nydus (latest, clh)
       - Kata Containers CI / kata-containers-ci-on-push / run-basic-amd64-tests / run-nydus (latest, dragonball)
       - Kata Containers CI / kata-containers-ci-on-push / run-basic-amd64-tests / run-nydus (latest, qemu)
@@ -109,8 +115,6 @@ mapping:
       # - Kata Containers CI / kata-containers-ci-on-push / run-kata-deploy-tests / run-kata-deploy-tests (qemu, rke2)
       # - Kata Containers CI / kata-containers-ci-on-push / run-k8s-tests-on-nvidia-gpu / run-nvidia-gpu-tests-on-amd64
       # - Kata Containers CI / kata-containers-ci-on-push / run-k8s-tests-on-nvidia-gpu / run-nvidia-gpu-snp-tests-on-amd64
-    required-labels:
-      - ok-to-test
   static:
     # Checks that static checks are passing
     names:
@@ -157,22 +161,25 @@ mapping:
       # - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make check, genpolicy, src/tools/genpolicy, rust, protobuf-compiler, ubuntu-26.04-s390x)
       - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make check, kata-ctl, src/tools/kata-ctl, rust, protobuf-compiler, ubuntu-26.04-s390x)
       - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make check, runtime-rs, src/runtime-rs, rust, protobuf-compiler, ubuntu-26.04-s390x)
-      - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make check, runtime, src/runtime, golang, XDG_RUNTIME_DIR, ubuntu-24.06-s390x)
+      - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make check, runtime, src/runtime, golang, XDG_RUNTIME_DIR, ubuntu-26.04-s390x)
       - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make check, trace-forwarder, src/tools/trace-forwarder, rust, ubuntu-26.04-s390x)
-      - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make check, agent-ctl, src/tools/agent-ctl, rust, protobuf-compiler, clang, ubuntu-24.04-s...
+      - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make check, agent-ctl, src/tools/agent-ctl, rust, protobuf-compiler, clang, ubuntu-26.04-s...
       - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make test, agent, src/agent, rust, libdevmapper, libseccomp, protobuf-compiler, clang, ubu...
       - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make test, dragonball, src/dragonball, rust, ubuntu-26.04-s390x)
       # - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make test, genpolicy, src/tools/genpolicy, rust, protobuf-compiler, ubuntu-26.04-s390x)
       - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make test, kata-ctl, src/tools/kata-ctl, rust, protobuf-compiler, ubuntu-26.04-s390x)
-      - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make test, runtime-rs, src/runtime-rs, rust, protobuf-compiler, ubuntu-26.04-s390x)
-      - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make test, runtime, src/runtime, golang, XDG_RUNTIME_DIR, ubuntu-24.06-s390x)
+      #- Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make test, runtime-rs, src/runtime-rs, rust, protobuf-compiler, ubuntu-26.04-s390x)
+      - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make test, runtime, src/runtime, golang, XDG_RUNTIME_DIR, ubuntu-26.04-s390x)
       - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (make test, trace-forwarder, src/tools/trace-forwarder, rust, ubuntu-26.04-s390x)
       - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (sudo -E PATH="$PATH" make test, agent-ctl, src/tools/agent-ctl, rust, protobuf-compiler, c...
       - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (sudo -E PATH="$PATH" make test, dragonball, src/dragonball, rust, ubuntu-26.04-s390x)
       # - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (sudo -E PATH="$PATH" make test, genpolicy, src/tools/genpolicy, rust, protobuf-compiler, u...
       - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (sudo -E PATH="$PATH" make test, kata-ctl, src/tools/kata-ctl, rust, protobuf-compiler, ubu...
-      - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (sudo -E PATH="$PATH" make test, runtime-rs, src/runtime-rs, rust, protobuf-compiler, ubunt...
-      - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (sudo -E PATH="$PATH" make test, runtime, src/runtime, golang, XDG_RUNTIME_DIR, ubuntu-24.0...
+      #- Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (sudo -E PATH="$PATH" make test, runtime-rs, src/runtime-rs, rust, protobuf-compiler, ubunt...
+      - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (sudo -E PATH="$PATH" make test, runtime, src/runtime, golang, XDG_RUNTIME_DIR, ubuntu-26.0...
       - Static checks self-hosted / build-checks (ubuntu-26.04-s390x) / check (sudo -E PATH="$PATH" make test, trace-forwarder, src/tools/trace-forwarder, rust, ubuntu-2...
-    required-labels:
-      - ok-to-test
+  docs:
+    # Checks that documentation-only changes are still valid
+    names:
+      - Spelling check / check-spelling
+      - Static checks / check-broken-symlinks

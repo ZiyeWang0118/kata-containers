@@ -30,6 +30,8 @@ on:
         value: ${{ jobs.skipper.outputs.skip_test }}
       skip_static:
         value: ${{ jobs.skipper.outputs.skip_static }}
+      skip_docs:
+        value: ${{ jobs.skipper.outputs.skip_docs }}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-gatekeeper-skipper
@@ -46,10 +48,12 @@ jobs:
       skip_build: ${{ steps.skipper.outputs.skip_build }}
       skip_test: ${{ steps.skipper.outputs.skip_test }}
       skip_static: ${{ steps.skipper.outputs.skip_static }}
+      skip_docs: ${{ steps.skipper.outputs.skip_docs }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit-hash }}
+          allow-unsafe-pr-checkout: true
           fetch-depth: 0
           persist-credentials: false
       - id: skipper

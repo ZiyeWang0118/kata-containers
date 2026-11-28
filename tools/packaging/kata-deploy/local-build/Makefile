@@ -29,6 +29,7 @@ BASE_TARBALLS = serial-targets \
 	stratovirt-tarball \
 	shim-v2-go-tarball \
 	shim-v2-rust-tarball \
+	td-shim-tarball \
 	virtiofsd-tarball
 BASE_SERIAL_TARBALLS = openvmm-tarball \
 	rootfs-image-tarball \
@@ -239,7 +240,17 @@ FINAL_TARBALL_NAME ?= kata-static.tar.zst
 %-tarball-build:
 	$(call BUILD,$*)
 
-agent-tarball: copy-scripts-for-the-agent-build
+ifneq ($(filter $(ARCH),x86_64 aarch64),)
+kata-static-substrate-tarball: rootfs-image-substrate-tarball kernel-tarball
+	$(MAKE) -f $(MK_PATH) merge-builds \
+		FINAL_TARBALL_NAME=kata-static-substrate.tar.zst \
+		FINAL_TARBALL_INPUTS="$(shell $(MK_DIR)/kata-release-tarball-inputs.sh kata-static-substrate $(ARCH) | tr '\n' ' ')"
+else
+kata-static-substrate-tarball:
+	@echo "kata-static-substrate-tarball: unsupported on $(ARCH)"; exit 1
+endif
+
+agent-tarball agent-substrate-tarball: copy-scripts-for-the-agent-build
 	${MAKE} $@-build
 
 agent-ctl-tarball: copy-scripts-for-the-tools-build
@@ -333,6 +344,9 @@ boot-image-se-runtime-rs-tarball: $(DEPS)
 stratovirt-tarball:
 	${MAKE} $@-build
 
+td-shim-tarball:
+	${MAKE} $@-build
+
 DEPS := agent-tarball
 rootfs-image-tarball: $(DEPS)
 	${MAKE} $@-build
@@ -374,6 +388,10 @@ rootfs-image-nvidia-gpu-confidential-tarball: $(DEPS)
 # so it keeps the monolith's (non-confidential) build dependencies.
 DEPS := agent-tarball busybox-tarball kernel-nvidia-gpu-tarball
 rootfs-image-nvidia-tarball: $(DEPS)
+	${MAKE} $@-build
+
+DEPS := agent-substrate-tarball
+rootfs-image-substrate-tarball: $(DEPS)
 	${MAKE} $@-build
 
 # The gpu extension is assembled directly from the package-installed rootfs and

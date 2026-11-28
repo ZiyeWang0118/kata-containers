@@ -207,7 +207,7 @@ get_ovmf_image_name() {
 
 get_busybox_image_name() {
 	busybox_script_dir="${repo_root_dir}/tools/packaging/static-build/busybox"
-	echo "${BUILDER_REGISTRY}:busybox-$(get_last_modification "${busybox_script_dir}")-$(uname -m)"
+	echo "${BUILDER_REGISTRY}:busybox-$(get_last_modification "${busybox_script_dir}")-oras-$(get_from_kata_deps ".externals.oras.version")-$(uname -m)"
 }
 
 get_openvmm_image_name() {
@@ -239,10 +239,17 @@ get_virtiofsd_image_name() {
 	echo "${BUILDER_REGISTRY}:virtiofsd-$(get_from_kata_deps ".externals.virtiofsd.toolchain")-${libc}-$(get_last_modification "${virtiofsd_script_dir}")-$(uname -m)"
 }
 
+get_td_shim_image_name() {
+	td_shim_script_dir="${repo_root_dir}/tools/packaging/static-build/td-shim"
+	echo "${BUILDER_REGISTRY}:td-shim-$(get_from_kata_deps ".externals.td-shim.toolchain")-$(get_last_modification "${td_shim_script_dir}")-$(uname -m)"
+}
+
 get_libseccomp_hash() {
-	merge_two_hashes \
+	local installer_hash
+	installer_hash=$(merge_two_hashes \
 		"$(get_last_modification "${repo_root_dir}/ci/install_libseccomp.sh")" \
-		"$(get_last_modification "${repo_root_dir}/tools/packaging/kata-deploy/local-build/kata-deploy-copy-libseccomp-installer.sh")"
+		"$(get_last_modification "${repo_root_dir}/tools/packaging/kata-deploy/local-build/kata-deploy-copy-libseccomp-installer.sh")")
+	merge_two_hashes "${installer_hash}" "$(get_from_kata_deps ".externals.libseccomp.version")"
 }
 
 get_tools_image_name() {
@@ -251,7 +258,7 @@ get_tools_image_name() {
 	libs_dir="${repo_root_dir}/src/libs"
 	agent_dir="${repo_root_dir}/src/agent"
 
-	echo "${BUILDER_REGISTRY}:tools-go-$(get_from_kata_deps ".languages.golang.meta.newest-version")-rust-$(get_from_kata_deps ".languages.rust.meta.newest-version")-$(get_libseccomp_hash)-$(get_last_modification "${tools_dir}")-$(get_last_modification "${libs_dir}")-$(get_last_modification "${agent_dir}")-$(get_last_modification "${tools_script_dir}")-$(uname -m)"
+	echo "${BUILDER_REGISTRY}:tools-go-$(get_from_kata_deps ".languages.golang.meta.newest-version")-rust-$(get_from_kata_deps ".languages.rust.meta.newest-version")-$(get_libseccomp_hash)-$(get_last_modification "${tools_dir}")-$(get_last_modification "${libs_dir}")-$(get_last_modification "${agent_dir}")-$(get_last_modification "${tools_script_dir}")-oras-$(get_from_kata_deps ".externals.oras.version")-$(uname -m)"
 }
 
 get_agent_image_name() {
@@ -259,10 +266,20 @@ get_agent_image_name() {
 	agent_dir="${repo_root_dir}/tools/packaging/static-build/agent"
 	rust_toolchain="$(get_from_kata_deps ".languages.rust.meta.newest-version")"
 
-	echo "${BUILDER_REGISTRY}:agent-${libseccomp_hash}-$(get_last_modification "${agent_dir}")-${rust_toolchain}-$(uname -m)"
+	echo "${BUILDER_REGISTRY}:agent-${libseccomp_hash}-$(get_last_modification "${agent_dir}")-${rust_toolchain}-oras-$(get_from_kata_deps ".externals.oras.version")-$(uname -m)"
 }
 
 get_pause_image_name() {
 	pause_image_script_dir="${repo_root_dir}/tools/packaging/static-build/pause-image"
 	echo "${BUILDER_REGISTRY}:pause-image-$(get_last_modification "${pause_image_script_dir}")-$(uname -m)"
+}
+
+# Map tool directory name under src/tools/ to the binary name produced by cargo
+get_tool_binary_name() {
+	local tool="${1}"
+	case "${tool}" in
+		agent-ctl) echo "kata-agent-ctl" ;;
+		trace-forwarder) echo "kata-trace-forwarder" ;;
+		*) echo "${tool}" ;;
+	esac
 }

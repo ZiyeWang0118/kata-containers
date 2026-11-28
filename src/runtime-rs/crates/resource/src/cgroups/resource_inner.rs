@@ -106,8 +106,11 @@ async fn empty_cgroup(cgroup: &dyn Manager, deadline: tokio::time::Instant) -> R
 fn kill_procs(cgroup: &dyn Manager, dir: &Path) -> Result<()> {
     let kill_file = dir.join("cgroup.kill");
     if kill_file.exists() {
-        return fs::write(&kill_file, "1")
-            .with_context(|| format!("write {}", kill_file.display()));
+        return match fs::write(&kill_file, "1") {
+            // The cgroup went away with its last process.
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            written => written.with_context(|| format!("write {}", kill_file.display())),
+        };
     }
 
     // Like runc without cgroup.kill: a frozen process can neither fork nor
@@ -273,7 +276,7 @@ impl CgroupsResourceInner {
     }
 
     /// Create a new `CgroupsResourceInner` instance.
-    pub(crate) fn new(config: &CgroupConfig) -> Result<Self> {
+    pub(crate) fn new(config: &CgroupConfig, attach_runtime: bool) -> Result<Self> {
         let (mut sandbox_cgroup, mut overhead_cgroup) =
             Self::new_cgroup_managers(config, false).context("create new cgroups")?;
 
@@ -285,7 +288,7 @@ impl CgroupsResourceInner {
                 pid,
                 "add runtime to overhead cgroup",
             )?;
-        } else {
+        } else if attach_runtime {
             Self::add_proc_with_existing_retry(
                 &mut sandbox_cgroup,
                 pid,

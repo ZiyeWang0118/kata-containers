@@ -14,8 +14,16 @@ concurrency:
 
 name: Darwin tests
 jobs:
+  skipper:
+    uses: ./.github/workflows/gatekeeper-skipper.yaml
+    with:
+      commit-hash: ${{ github.event.pull_request.head.sha }}
+      target-branch: ${{ github.event.pull_request.base.ref }}
+
   test:
     name: test
+    needs: skipper
+    if: ${{ needs.skipper.outputs.skip_build != 'yes' }}
     runs-on: macos-latest
     timeout-minutes: 35
     steps:
@@ -28,7 +36,7 @@ jobs:
         echo "$HOME/.local/bin" >> "${GITHUB_PATH}"
 
     - name: Checkout code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
 

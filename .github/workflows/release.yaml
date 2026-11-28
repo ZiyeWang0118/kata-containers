@@ -17,7 +17,7 @@ jobs:
       contents: write # needed for the `gh release create` command
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -102,7 +102,7 @@ jobs:
       packages: write # needed to push the multi-arch manifest to ghcr.io
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -140,7 +140,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -166,6 +166,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ARCHITECTURE: amd64
 
+      - name: Download amd64 Substrate guest artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: kata-static-substrate-tarball-amd64
+
+      - name: Upload amd64 Substrate static tarball to GitHub
+        run: ./tools/packaging/release/release.sh upload-kata-substrate-static-tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHITECTURE: amd64
+          KATA_SUBSTRATE_STATIC_TARBALL: kata-static-substrate.tar.zst
+
       - name: Download amd64 Go runtime artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
@@ -189,6 +201,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ARCHITECTURE: arm64
+
+      - name: Download arm64 Substrate guest artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: kata-static-substrate-tarball-arm64
+
+      - name: Upload arm64 Substrate static tarball to GitHub
+        run: ./tools/packaging/release/release.sh upload-kata-substrate-static-tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHITECTURE: arm64
+          KATA_SUBSTRATE_STATIC_TARBALL: kata-static-substrate.tar.zst
 
       - name: Download arm64 Go runtime artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -250,22 +274,40 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ARCHITECTURE: ppc64le
 
+  upload-kata-tools-static-tarball:
+    name: upload-kata-tools-static-tarball (${{ matrix.arch }})
+    needs: [build-and-push-assets-amd64, build-and-push-assets-s390x]
+    permissions:
+      contents: write # needed for the `gh release` commands
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        arch:
+          - amd64
+          - s390x
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Set KATA_TOOLS_STATIC_TARBALL env var
         run: |
           tarball=$(pwd)/kata-tools-static.tar.zst
           echo "KATA_TOOLS_STATIC_TARBALL=${tarball}" >> "$GITHUB_ENV"
 
-      - name: Download amd64 tools artifacts
+      - name: Download ${{ matrix.arch }} tools artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: kata-tools-static-tarball-amd64
+          name: kata-tools-static-tarball-${{ matrix.arch }}
 
-      - name: Upload amd64 static tarball tools to GitHub
+      - name: Upload ${{ matrix.arch }} static tarball tools to GitHub
         run: |
           ./tools/packaging/release/release.sh upload-kata-tools-static-tarball
         env:
           GH_TOKEN: ${{ github.token }}
-          ARCHITECTURE: amd64
+          ARCHITECTURE: ${{ matrix.arch }}
 
   upload-versions-yaml:
     name: upload-versions-yaml
@@ -276,7 +318,7 @@ jobs:
       contents: write # needed for the `gh release` commands
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -295,7 +337,7 @@ jobs:
       contents: write # needed for the `gh release` commands
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -314,7 +356,7 @@ jobs:
       contents: write # needed for the `gh release` commands
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -334,7 +376,7 @@ jobs:
       packages: write # needed to push the helm chart to ghcr.io
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -371,14 +413,14 @@ jobs:
 
   publish-release:
     name: publish-release
-    needs: [ build-and-push-assets-amd64, build-and-push-assets-arm64, build-and-push-assets-s390x, build-and-push-assets-ppc64le, publish-multi-arch-images, publish-kata-monitor-image, upload-multi-arch-static-tarball, upload-versions-yaml, upload-cargo-vendored-tarball, upload-libseccomp-tarball, upload-helm-chart-tarball ]
+    needs: [ build-and-push-assets-amd64, build-and-push-assets-arm64, build-and-push-assets-s390x, build-and-push-assets-ppc64le, publish-multi-arch-images, publish-kata-monitor-image, upload-multi-arch-static-tarball, upload-kata-tools-static-tarball, upload-versions-yaml, upload-cargo-vendored-tarball, upload-libseccomp-tarball, upload-helm-chart-tarball ]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write # needed for the `gh release` commands
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 

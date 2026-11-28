@@ -71,6 +71,7 @@ else
 		"k8s-sealed-secret.bats" \
 		"k8s-attach-handlers.bats" \
 		"k8s-block-volume.bats" \
+		"k8s-block-volume-init-container.bats" \
 		"k8s-caps.bats" \
 		"k8s-configmap.bats" \
 		"k8s-copy-file.bats" \
@@ -113,6 +114,7 @@ else
 		"k8s-sandbox-cgroup.bats" \
 		"k8s-sandbox-cgroup-placement.bats" \
 		"k8s-seccomp.bats" \
+		"k8s-shim-kill-cleanup.bats" \
 		"k8s-sysctls.bats" \
 		"k8s-security-context.bats" \
 		"k8s-shared-volume.bats" \

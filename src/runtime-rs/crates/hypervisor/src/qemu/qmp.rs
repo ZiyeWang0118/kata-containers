@@ -21,10 +21,11 @@ use qapi_qmp::{
 };
 use qapi_qmp::{migrate, migrate_incoming, migrate_set_capabilities};
 use qapi_qmp::{MigrationCapability, MigrationCapabilityStatus};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::fmt::{Debug, Error, Formatter};
-use std::io::BufReader;
+use std::io::{self, BufRead, BufReader, Read};
+use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::str::FromStr;
@@ -35,12 +36,111 @@ use std::thread;
 use std::time::Instant;
 
 /// default qmp connection read timeout
-const DEFAULT_QMP_READ_TIMEOUT: u64 = 250;
-const DEFAULT_QMP_INIT_READ_TIMEOUT: u64 = 5000;
+const DEFAULT_QMP_READ_TIMEOUT: u64 = 5000;
 const DEFAULT_QMP_CONNECT_DEADLINE_MS: u64 = 50000;
 const DEFAULT_QMP_RETRY_SLEEP_MS: u64 = 50;
 
 const DEVICE_DELETED_TIMEOUT: Duration = Duration::from_secs(10);
+
+type QmpStream = qapi::Qmp<qapi::Stream<QmpReader, UnixStream>>;
+
+// qapi throws away what it has read of a line when the read times out, and
+// the rest of that reply can then no longer be parsed.
+struct QmpReader {
+    stream: BufReader<UnixStream>,
+    line: Vec<u8>,
+    complete: bool,
+}
+
+impl Read for QmpReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let line = self.fill_buf()?;
+        let len = line.len().min(buf.len());
+        buf[..len].copy_from_slice(&line[..len]);
+        self.consume(len);
+        Ok(len)
+    }
+}
+
+impl BufRead for QmpReader {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if !self.complete {
+            self.stream.read_until(b'\n', &mut self.line)?;
+            self.complete = true;
+        }
+        Ok(&self.line)
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.line.drain(..amount);
+        self.complete = !self.line.is_empty();
+    }
+}
+
+// A late reply can belong to any command, so its type is not known when it
+// is read.
+#[derive(serde::Serialize)]
+struct AnyCommand;
+
+impl qapi::Command for AnyCommand {
+    type Ok = serde_json::Value;
+
+    const NAME: &'static str = "";
+    const ALLOW_OOB: bool = false;
+}
+
+// QEMU answers commands in the order it got them. A reply the shim stopped
+// waiting for still comes, and has to be read before the next command is
+// sent, or it is taken for the reply to that command.
+struct QmpClient {
+    stream: QmpStream,
+    late_reply: bool,
+}
+
+impl Deref for QmpClient {
+    type Target = QmpStream;
+
+    fn deref(&self) -> &QmpStream {
+        &self.stream
+    }
+}
+
+impl DerefMut for QmpClient {
+    fn deref_mut(&mut self) -> &mut QmpStream {
+        &mut self.stream
+    }
+}
+
+impl QmpClient {
+    fn discard_late_reply(&mut self) -> io::Result<()> {
+        if self.late_reply {
+            if let Err(qapi::ExecuteError::Io(err)) = self.stream.read_response::<AnyCommand>() {
+                return Err(err);
+            }
+            self.late_reply = false;
+        }
+        Ok(())
+    }
+
+    fn read_reply<C: qapi::Command>(&mut self) -> qapi::ExecuteResult<C> {
+        let reply = self.stream.read_response::<C>();
+        if let Err(qapi::ExecuteError::Io(err)) = &reply {
+            if matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) {
+                self.late_reply = true;
+            }
+        }
+        reply
+    }
+
+    fn execute<C: qapi::Command>(&mut self, command: &C) -> qapi::ExecuteResult<C> {
+        self.discard_late_reply()?;
+        self.stream.write_command(command)?;
+        self.read_reply::<C>()
+    }
+}
 
 fn collect_block_fdsets(fdsets: Vec<qmp::FdsetInfo>) -> HashMap<String, Vec<i64>> {
     let mut block_fdsets: HashMap<String, Vec<i64>> = HashMap::new();
@@ -59,7 +159,7 @@ fn collect_block_fdsets(fdsets: Vec<qmp::FdsetInfo>) -> HashMap<String, Vec<i64>
 }
 
 pub struct Qmp {
-    qmp: qapi::Qmp<qapi::Stream<BufReader<UnixStream>, UnixStream>>,
+    qmp: QmpClient,
 
     // This is basically the output of
     // `cat /sys/devices/system/memory/block_size_bytes`
@@ -98,19 +198,31 @@ impl Debug for Qmp {
 }
 
 impl Qmp {
-    pub fn new(qmp_sock_path: &str) -> Result<Self> {
+    // A VMM that is gone will never listen on the socket, and waiting out the
+    // deadline only delays the error and hides its cause.
+    pub fn new(
+        qmp_sock_path: &str,
+        mut vmm_exited: impl FnMut() -> Option<String>,
+    ) -> Result<Self> {
         let try_new_once_fn = || -> Result<Qmp> {
             let stream = UnixStream::connect(qmp_sock_path)?;
 
             stream
-                .set_read_timeout(Some(Duration::from_millis(DEFAULT_QMP_INIT_READ_TIMEOUT)))
+                .set_read_timeout(Some(Duration::from_millis(DEFAULT_QMP_READ_TIMEOUT)))
                 .context("set qmp read timeout")?;
 
             let mut qmp = Qmp {
-                qmp: qapi::Qmp::new(qapi::Stream::new(
-                    BufReader::new(stream.try_clone()?),
-                    stream,
-                )),
+                qmp: QmpClient {
+                    stream: qapi::Qmp::new(qapi::Stream::new(
+                        QmpReader {
+                            stream: BufReader::new(stream.try_clone()?),
+                            line: Vec::new(),
+                            complete: false,
+                        },
+                        stream,
+                    )),
+                    late_reply: false,
+                },
                 guest_memory_block_size: 0,
                 ccw_subchannel: None,
                 pci_bridge_devices: HashMap::new(),
@@ -131,6 +243,9 @@ impl Qmp {
             match try_new_once_fn() {
                 Ok(qmp) => return Ok(qmp),
                 Err(e) => {
+                    if let Some(reason) = vmm_exited() {
+                        return Err(anyhow!("QEMU exited before QMP was ready: {reason}"));
+                    }
                     debug!(sl!(), "QMP not ready yet: {}", e);
                     last_err = Some(e);
                     thread::sleep(Duration::from_millis(DEFAULT_QMP_RETRY_SLEEP_MS));
@@ -871,6 +986,7 @@ impl Qmp {
         let fds = [fd];
         let cmsg = [ControlMessage::ScmRights(&fds)];
 
+        self.qmp.discard_late_reply()?;
         let result = sendmsg::<()>(
             self.qmp.inner_mut().get_mut_write().as_raw_fd(),
             bufs,
@@ -880,7 +996,7 @@ impl Qmp {
         );
         info!(sl!(), "sendmsg() result: {:#?}", result);
 
-        let result = self.qmp.read_response::<&qmp::getfd>();
+        let result = self.qmp.read_reply::<&qmp::getfd>();
 
         match result {
             Ok(_) => {
@@ -901,6 +1017,7 @@ impl Qmp {
         let fds = [fd];
         let cmsg = [ControlMessage::ScmRights(&fds)];
 
+        self.qmp.discard_late_reply()?;
         sendmsg::<()>(
             self.qmp.inner_mut().get_mut_write().as_raw_fd(),
             bufs,
@@ -911,8 +1028,49 @@ impl Qmp {
         .with_context(|| format!("send QEMU block fd for {opaque}"))?;
 
         self.qmp
-            .read_response::<&qmp::add_fd>()
+            .read_reply::<&qmp::add_fd>()
             .with_context(|| format!("add QEMU block fd for {opaque}"))
+    }
+
+    // When QEMU is slow to reply, a hotplug or a hotunplug can time out half
+    // way. The block node, or its file descriptors, then stay in QEMU as a
+    // second disk reference to the volume, and nothing else removes them.
+    fn remove_leftover_block_nodes(&mut self) -> Result<()> {
+        let disks: HashSet<String> = self
+            .qmp
+            .execute(&qapi_qmp::qom_list {
+                path: "/machine/peripheral".to_owned(),
+            })?
+            .into_iter()
+            .map(|device| device.name)
+            .collect();
+        let nodes: HashSet<String> = self
+            .qmp
+            .execute(&qmp::query_named_block_nodes { flat: Some(true) })?
+            .into_iter()
+            .filter_map(|node| node.node_name)
+            .collect();
+
+        let leftovers: HashSet<String> = nodes
+            .iter()
+            .chain(self.block_fdsets.keys())
+            .filter(|name| name.starts_with(BLOCK_NODE_PREFIX) && !disks.contains(*name))
+            .cloned()
+            .collect();
+
+        for name in leftovers {
+            if nodes.contains(&name) {
+                let node_name = name.clone();
+                if let Err(err) = self.qmp.execute(&qapi_qmp::blockdev_del { node_name }) {
+                    warn!(sl!(), "leftover block node {} stays: {:?}", name, err);
+                    continue;
+                }
+            }
+            info!(sl!(), "removed what was left of block device {}", name);
+            self.remove_block_fdsets(&name);
+        }
+
+        Ok(())
     }
 
     fn remove_block_fdsets(&mut self, node_name: &str) {
@@ -1150,7 +1308,7 @@ impl Qmp {
             .set_read_timeout(Some(timeout))?;
 
         let result = loop {
-            if let Err(e) = self.qmp.nop() {
+            if let Err(e) = self.qmp.execute(&qmp::query_version {}) {
                 warn!(sl!(), "The QMP nop() failed for {}: {:?}", device_id, e);
             }
 
@@ -1248,6 +1406,8 @@ impl Qmp {
     ) -> Result<(Option<PciPath>, Option<String>)> {
         // `blockdev-add`
         let node_name = block_node_name(index);
+        self.remove_leftover_block_nodes()
+            .context("remove leftover block nodes")?;
         if self.block_fdsets.contains_key(&node_name) {
             return Err(anyhow!("duplicate QEMU block device ID {node_name}"));
         }
@@ -1613,6 +1773,9 @@ impl Qmp {
 
         let (vfio_device_add, early_return) = match driver {
             "vfio-ap" => {
+                // Like PCI hot-plug, AP hot-plug does not pass an iommufd object or
+                // fds over QMP, so `sysfsdev` is used for both legacy-group and
+                // IOMMUFD-cdev discovered devices.
                 vfio_args.insert("sysfsdev".to_owned(), sysfs_path.to_string().into());
                 let device_add = qmp::device_add {
                     driver: driver.to_string(),
@@ -1642,33 +1805,9 @@ impl Qmp {
         };
         info!(sl!(), "vfio_device_add: {:?}", vfio_device_add.clone());
 
-        // We've chosen to set a 5-second read timeout on Unix sockets for QMP operations. We consider set_read_timeout()
-        // a lightweight operation that shouldn't significantly impact performance, even with multiple VFIO devices.
-        // However, we also need to ensure its debuggability.
-        // As it could obscure the root cause of connection failures as set an excessively long QMP timeout.
-        // For example, if QEMU fails to launch, a 5-second QMP timeout will immediately provide a "QMP connection failed" log message,
-        // clearly pinpointing the issue. Conversely, a prolonged timeout might only result in vague error messages, making debugging
-        // difficult as it won't explicitly indicate where the problem lies.
-
-        // Given our current inability to comprehensively test across a wide range of hardware and configurations, we've made a pragmatic
-        // decision: we'll maintain the 5-second timeout for now. A configurable timeout option will be introduced if future use cases
-        // clearly demonstrate a justified need.
-        {
-            // set read timeout with 5000
-            self.qmp
-                .inner_mut()
-                .get_mut_write()
-                .set_read_timeout(Some(Duration::from_millis(5000)))?;
-            // send the VFIO hotplug request
-            self.qmp
-                .execute(&vfio_device_add)
-                .map_err(|e| anyhow!("device_add vfio device failed {:?}", e))?;
-            // reset read timeout with 250
-            self.qmp
-                .inner_mut()
-                .get_mut_write()
-                .set_read_timeout(Some(Duration::from_millis(DEFAULT_QMP_READ_TIMEOUT)))?;
-        }
+        self.qmp
+            .execute(&vfio_device_add)
+            .map_err(|e| anyhow!("device_add vfio device failed {:?}", e))?;
 
         // For AP devices, we don't need to get the PCI path as it's not available.
         if let Some(result) = early_return {
@@ -1900,13 +2039,85 @@ pub fn get_qmp_socket_path(sid: &str) -> String {
 }
 
 /// Generate a blockdev node name based on the given index.
+const BLOCK_NODE_PREFIX: &str = "drive-";
+
 fn block_node_name(index: u64) -> String {
-    format!("drive-{index}")
+    format!("{BLOCK_NODE_PREFIX}{index}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
+    use std::io::Write;
+    use std::os::unix::net::UnixListener;
+
+    fn slow_to_stop_qemu(listener: UnixListener, delay: Duration, bytes_before_delay: usize) {
+        let (stream, _) = listener.accept().unwrap();
+        let mut replies = stream.try_clone().unwrap();
+        let greeting = json!({"QMP": {
+            "version": {"qemu": {"micro": 0, "minor": 2, "major": 9}, "package": ""},
+            "capabilities": []
+        }});
+        writeln!(replies, "{greeting}").unwrap();
+        for line in BufReader::new(stream).lines() {
+            let command: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            let name = command["execute"].as_str().unwrap();
+            let reply = match name {
+                "stop" | "qmp_capabilities" => json!({"return": {}}),
+                _ => json!({"return": []}),
+            }
+            .to_string();
+            let split = if name == "stop" {
+                bytes_before_delay
+            } else {
+                reply.len()
+            };
+            write!(replies, "{}", &reply[..split]).unwrap();
+            if name == "stop" {
+                thread::sleep(delay);
+            }
+            writeln!(replies, "{}", &reply[split..]).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_late_reply_is_not_taken_for_the_next_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        thread::spawn(move || slow_to_stop_qemu(listener, Duration::from_millis(300), 0));
+
+        let mut qmp = Qmp::new(path.to_str().unwrap(), || None).unwrap();
+        qmp.qmp
+            .inner_mut()
+            .get_mut_write()
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+
+        assert!(qmp.qmp_stop().is_err());
+        thread::sleep(Duration::from_millis(400));
+        assert!(!qmp.device_exists("drive-1").unwrap());
+    }
+
+    #[test]
+    fn a_reply_cut_off_by_the_read_timeout_is_not_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        thread::spawn(move || slow_to_stop_qemu(listener, Duration::from_millis(300), 5));
+
+        let mut qmp = Qmp::new(path.to_str().unwrap(), || None).unwrap();
+        qmp.qmp
+            .inner_mut()
+            .get_mut_write()
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+
+        assert!(qmp.qmp_stop().is_err());
+        thread::sleep(Duration::from_millis(400));
+        assert!(!qmp.device_exists("drive-1").unwrap());
+    }
 
     #[test]
     fn reconstructs_kata_block_fdsets_from_qmp() {
